@@ -98,7 +98,7 @@ export default function Home() {
           <div className="card shadow-sm">
             <div className="card-body p-4">
               <label htmlFor="repoUrl" className="form-label fw-bold">
-                URL de tu repositorio en GitHub
+                https://github.com/Milpagit/OpenDocs-AI
               </label>
               <div className="input-group">
                 <input
