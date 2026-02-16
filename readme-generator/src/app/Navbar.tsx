@@ -82,7 +82,7 @@ export default function Navbar() {
             </li>
             <li className="nav-item">
               <a
-                href="https://github.com/milpagit/OpenDocs-AI"
+                href="https://github.com/Milpagit/readme-generator"
                 className="nav-link"
                 target="_blank"
                 rel="noreferrer"
