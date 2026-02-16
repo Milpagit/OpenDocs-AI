@@ -231,6 +231,113 @@ async function fetchGitHubLanguages(
   return Object.keys(data);
 }
 
+interface GitHubContentItem {
+  name: string;
+  path: string;
+  type: "file" | "dir" | string;
+}
+
+async function fetchGitHubDirectoryContents(
+  owner: string,
+  repo: string,
+  path: string,
+): Promise<GitHubContentItem[] | null> {
+  const base = `https://api.github.com/repos/${owner}/${repo}/contents`;
+  const url = path ? `${base}/${encodeURIComponent(path)}` : base;
+
+  const res = await fetch(url, {
+    headers: getGitHubHeaders(),
+    next: { revalidate: 300 },
+  }).catch(() => null);
+
+  if (!res || !res.ok) return null;
+
+  const data: any = await res.json().catch(() => null);
+  if (!Array.isArray(data)) return null;
+
+  return data as GitHubContentItem[];
+}
+
+async function fetchGitHubRepoStructure(
+  owner: string,
+  repo: string,
+): Promise<string | null> {
+  // Intentamos primero con la rama main y si falla confiamos en que la API
+  // de contents sin ref aún devuelva algo razonable.
+  const ignoreNames = new Set([
+    ".git",
+    ".github",
+    "node_modules",
+    ".next",
+    "dist",
+    "build",
+    "coverage",
+    "README.md",
+    "LICENSE",
+    "LICENSE.md",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    ".gitignore",
+    ".eslintrc",
+    ".eslintrc.js",
+    ".prettierrc",
+    ".prettierignore",
+  ]);
+
+  const maxDepth = 2;
+  const maxEntries = 40;
+
+  const summaries: { path: string; type: "file" | "dir" }[] = [];
+  const queue: { path: string; depth: number }[] = [{ path: "", depth: 0 }];
+
+  while (queue.length && summaries.length < maxEntries) {
+    const current = queue.shift()!;
+    const contents = await fetchGitHubDirectoryContents(
+      owner,
+      repo,
+      current.path,
+    );
+
+    if (!contents) continue;
+
+    for (const item of contents) {
+      const name = item.name;
+      if (ignoreNames.has(name)) continue;
+
+      const type =
+        item.type === "dir" ? "dir" : item.type === "file" ? "file" : "file";
+      const fullPath = item.path;
+
+      summaries.push({ path: fullPath, type });
+
+      if (
+        type === "dir" &&
+        current.depth + 1 <= maxDepth &&
+        summaries.length < maxEntries
+      ) {
+        queue.push({ path: fullPath, depth: current.depth + 1 });
+      }
+
+      if (summaries.length >= maxEntries) break;
+    }
+  }
+
+  if (!summaries.length) return null;
+
+  const lines: string[] = [];
+  lines.push("## Estructura del repositorio (resumen)");
+  lines.push(
+    "La siguiente lista muestra solo las rutas más relevantes. Los archivos de infraestructura o muy genéricos pueden omitirse.",
+  );
+
+  for (const entry of summaries) {
+    lines.push(`- [${entry.type}] ${entry.path}`);
+  }
+
+  return lines.join("\n");
+}
+
 function normalizeName(value: string | undefined | null): string | null {
   if (!value) return null;
   const trimmed = value.trim();
@@ -398,12 +505,14 @@ async function basicGitHubScrape(owner: string, repo: string): Promise<string> {
   const pkgMainUrl = `https://raw.githubusercontent.com/${owner}/${repo}/main/package.json`;
   const pkgMasterUrl = `https://raw.githubusercontent.com/${owner}/${repo}/master/package.json`;
 
-  const [readmeMain, readmeMaster, pkgMain, pkgMaster] = await Promise.all([
-    fetchText(readmeMainUrl),
-    fetchText(readmeMasterUrl),
-    fetchText(pkgMainUrl),
-    fetchText(pkgMasterUrl),
-  ]);
+  const [readmeMain, readmeMaster, pkgMain, pkgMaster, structure] =
+    await Promise.all([
+      fetchText(readmeMainUrl),
+      fetchText(readmeMasterUrl),
+      fetchText(pkgMainUrl),
+      fetchText(pkgMasterUrl),
+      fetchGitHubRepoStructure(owner, repo),
+    ]);
 
   const readme = readmeMain ?? readmeMaster ?? "";
   const pkg = pkgMain ?? pkgMaster ?? "";
@@ -422,6 +531,10 @@ async function basicGitHubScrape(owner: string, repo: string): Promise<string> {
   if (readme) {
     parts.push("\n## README existente (si hay)\n");
     parts.push(readme.slice(0, 8000));
+  }
+
+  if (structure) {
+    parts.push("\n" + structure + "\n");
   }
 
   return parts.join("\n\n");
@@ -447,6 +560,13 @@ function formatStackContext(stack: DetectedStack): string {
     lines.push("\n## Lenguajes detectados (GitHub Languages API)");
     for (const lang of stack.languages) {
       lines.push(`- ${lang}`);
+    }
+  }
+
+  if (stack.rawDependencies.length) {
+    lines.push("\n## Dependencias detectadas (nombres normalizados)");
+    for (const dep of stack.rawDependencies) {
+      lines.push(`- ${dep}`);
     }
   }
 
@@ -485,6 +605,13 @@ Strict requirements:
 - Do not invent features, APIs, or technologies that are not clearly implied by the data.
 - If something is not specified (e.g. license, deployment steps), add a short generic note instead of hallucinating details.
 - Prefer concise, scannable sections over long paragraphs.
+ - A technology (for example React, Java, PostgreSQL) may appear in the Tech Stack only if it is present in one of these sources inside the "Repository data" text:
+   - the "Tecnologías detectadas" section,
+   - the "Lenguajes detectados" section,
+   - or mentioned literally in one of the provided files (README.md, package.json, requirements.txt, go.mod, etc.).
+ - Never add technologies or components based only on the repository name or vague guesses. If a technology name never appears in the repository data, you must treat it as forbidden and not mention it anywhere in the README.
+ - When writing the Prerequisites, Installation and Usage sections, derive the required tools only from the actual tech stack and dependencies. Do not mention runtimes, databases or frameworks (for example Java, Python, MySQL) if they are not present in the repository data.
+ - When you lack concrete information for any section, explicitly say that the information is not available from the repository data instead of inventing details.
 
 The README.md MUST include, in this order:
 1. Project title and one-sentence tagline.
@@ -496,6 +623,7 @@ The README.md MUST include, in this order:
 7. **Usage** section with basic examples (how to run dev server, build, run tests, or binary, depending on the data).
 8. **Scripts** (or Commands) section if a package.json or similar exists, summarizing the most relevant scripts.
 9. **Folder structure** (optional, only if it can be reasonably inferred from the provided data).
+  - Use a small Markdown table where each row contains: Path | Type (file/folder) | Short purpose. Use the raw repository structure information provided in the repository data. Ignore infrastructure-only or very generic files and folders such as node_modules, .git, build outputs, lockfiles and configuration-only files.
 10. **Contributing** section (generic but professional guidelines are fine).
 11. **License** section (if the license can be inferred from the data; otherwise, add a short note indicating that the license is not clearly specified).
 
